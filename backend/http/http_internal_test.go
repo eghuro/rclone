@@ -366,6 +366,36 @@ func TestIsAFileSubDir(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestSingleFileSplit(t *testing.T) {
+	for i, test := range []struct {
+		root       string
+		wantLeaf   string
+		wantParent string
+		wantErr    bool
+	}{
+		{"x", "x", "", false},
+		{"a/b", "b", "a", false},
+		{"a/b/c", "c", "a/b", false},
+		{"/foo", "foo", "", false}, // path.Dir("/foo") == "/" -> normalised to ""
+
+		// Degenerate inputs: must be rejected rather than poisoning the Fs
+		// with an unusable leaf such as "." or "/".
+		{".", "", "", true},
+		{"/", "", "", true},
+		{"", "", "", true},
+	} {
+		leaf, parent, err := singleFileSplit(test.root)
+		what := fmt.Sprintf("test %d root=%q", i, test.root)
+		if test.wantErr {
+			assert.Error(t, err, what)
+		} else {
+			require.NoError(t, err, what)
+		}
+		assert.Equal(t, test.wantLeaf, leaf, what)
+		assert.Equal(t, test.wantParent, parent, what)
+	}
+}
+
 func TestParseName(t *testing.T) {
 	for i, test := range []struct {
 		base    string

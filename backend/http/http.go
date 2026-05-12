@@ -298,13 +298,34 @@ func (f *Fs) httpConnection(ctx context.Context, opt *Options) (isFile bool, err
 
 	if isFile {
 		// Correct root if definitely pointing to a file
-		f.fileName = path.Base(f.root)
-		f.root = path.Dir(f.root)
-		if f.root == "." || f.root == "/" {
-			f.root = ""
+		leaf, parent, err := singleFileSplit(f.root)
+		if err != nil {
+			return false, err
 		}
+		f.fileName = leaf
+		f.root = parent
 	}
 	return isFile, nil
+}
+
+// singleFileSplit derives the leaf filename and parent directory for an
+// Fs root that getFsEndpoint determined to resolve to a single file.
+// It rejects degenerate inputs ("", ".", "/") that would leave the Fs
+// with an unusable leaf such as "." or "/", which downstream consumers
+// (List, NewObject) would then push into HEAD requests as a bogus path.
+// Today getFsEndpoint never produces these, but enforcing the invariant
+// at the producer means a future change there can't silently poison
+// the Fs.
+func singleFileSplit(root string) (leaf, parent string, err error) {
+	leaf = path.Base(root)
+	if leaf == "." || leaf == "/" || leaf == "" {
+		return "", "", fmt.Errorf("http: cannot derive filename from root %q", root)
+	}
+	parent = path.Dir(root)
+	if parent == "." || parent == "/" {
+		parent = ""
+	}
+	return leaf, parent, nil
 }
 
 // NewFs creates a new Fs object from the name and root. It connects to
