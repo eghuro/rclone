@@ -346,6 +346,46 @@ func TestIsAFileRoot(t *testing.T) {
 	assert.Equal(t, fs.ErrorDirNotFound, err)
 }
 
+// TestIsAFileListErrorWrapped verifies that when List() in pinned-file
+// mode fails (e.g. server returns 500 on the per-call HEAD), the error
+// is wrapped with the same "error listing %q" prefix that the
+// directory-listing path uses. Otherwise callers/log scanners that
+// match the prefix see inconsistent failure messages depending on
+// whether the Fs is pinned.
+func TestIsAFileListErrorWrapped(t *testing.T) {
+	headCount := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "HEAD" {
+			http.Error(w, "expected HEAD", http.StatusBadRequest)
+			return
+		}
+		headCount++
+		if headCount == 1 {
+			// First HEAD: getFsEndpoint deciding file vs dir.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Subsequent HEAD: from NewObject inside List() -- fail.
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	configfile.Install()
+	m := configmap.Simple{
+		"type": "http",
+		"url":  ts.URL,
+	}
+
+	f, err := NewFs(context.Background(), remoteName, "thefile", m)
+	require.ErrorIs(t, err, fs.ErrorIsFile)
+
+	_, err = f.List(context.Background(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error listing",
+		"single-file List should wrap NewObject failures the same way as the directory path")
+}
+
 func TestIsAFileSubDir(t *testing.T) {
 	m := prepareServer(t)
 

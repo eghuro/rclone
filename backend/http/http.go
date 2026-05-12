@@ -573,7 +573,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		}
 		obj, err := f.NewObject(ctx, f.fileName)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error listing pinned file %q: %w", f.fileName, err)
 		}
 		return fs.DirEntries{obj}, nil
 	}
