@@ -156,7 +156,10 @@ type Fs struct {
 	endpoint    *url.URL
 	endpointURL string // endpoint as a string
 	httpClient  *http.Client
-	fileName    string // set if we are pointing to a file
+	fileName    string  // set if we are pointing to a file
+	fileObj     *Object // cached Object for the single-file pin, populated
+	//                    from the HEAD made during NewFs so List() doesn't
+	//                    have to issue a second HEAD on every call.
 }
 
 // Object is a remote object that has been stat'd (so it exists, but is not necessarily open for reading)
@@ -189,23 +192,28 @@ func statusError(res *http.Response, err error) error {
 
 // getFsEndpoint decides if url is to be considered a file or directory,
 // and returns a proper endpoint url to use for the fs.
-func getFsEndpoint(ctx context.Context, client *http.Client, url string, opt *Options) (string, bool) {
+//
+// When the URL was definitively identified as a file by a successful
+// HEAD (2xx), the raw response is also returned so the caller can
+// reuse its metadata; in every other case fileRes is nil. The caller
+// owns the response body and must close it.
+func getFsEndpoint(ctx context.Context, client *http.Client, url string, opt *Options) (endpoint string, isFile bool, fileRes *http.Response) {
 	// If url ends with '/' it is already a proper url always assumed to be a directory.
 	if url[len(url)-1] == '/' {
-		return url, false
+		return url, false, nil
 	}
 
 	// If url does not end with '/' we send a HEAD request to decide
 	// if it is directory or file, and if directory appends the missing
 	// '/', or if file returns the directory url to parent instead.
-	createFileResult := func() (string, bool) {
+	createFileResult := func() (string, bool, *http.Response) {
 		fs.Debugf(nil, "If path is a directory you must add a trailing '/'")
 		parent, _ := path.Split(url)
-		return parent, true
+		return parent, true, nil
 	}
-	createDirResult := func() (string, bool) {
+	createDirResult := func() (string, bool, *http.Response) {
 		fs.Debugf(nil, "To avoid the initial HEAD request add a trailing '/' to the path")
-		return url + "/", false
+		return url + "/", false, nil
 	}
 
 	// If HEAD requests are not allowed we just have to assume it is a file.
@@ -259,7 +267,8 @@ func getFsEndpoint(ctx context.Context, client *http.Client, url string, opt *Op
 	}
 
 	fs.Debugf(nil, "Assuming path is a file as HEAD response is success (%s)", res.Status)
-	return createFileResult()
+	parent, _ := path.Split(url)
+	return parent, true, res
 }
 
 // Make the http connection with opt
@@ -284,10 +293,13 @@ func (f *Fs) httpConnection(ctx context.Context, opt *Options) (isFile bool, err
 
 	client := fshttp.NewClient(ctx)
 
-	endpoint, isFile := getFsEndpoint(ctx, client, u.String(), opt)
+	endpoint, isFile, fileRes := getFsEndpoint(ctx, client, u.String(), opt)
 	fs.Debugf(nil, "Root: %s", endpoint)
 	u, err = url.Parse(endpoint)
 	if err != nil {
+		if fileRes != nil {
+			_ = fileRes.Body.Close()
+		}
 		return false, err
 	}
 
@@ -303,6 +315,20 @@ func (f *Fs) httpConnection(ctx context.Context, opt *Options) (isFile bool, err
 		if f.root == "." || f.root == "/" {
 			f.root = ""
 		}
+		if fileRes != nil {
+			// Reuse the metadata from the HEAD that detected the file,
+			// so List() doesn't have to issue a second HEAD.
+			o := &Object{fs: f, remote: f.fileName}
+			if decErr := o.decodeMetadata(ctx, fileRes); decErr == nil {
+				f.fileObj = o
+			} else {
+				fs.Debugf(nil, "single-file: discarding cached HEAD metadata: %v", decErr)
+			}
+			_ = fileRes.Body.Close()
+		}
+	} else if fileRes != nil {
+		// Shouldn't happen (only set when isFile), but don't leak.
+		_ = fileRes.Body.Close()
 	}
 	return isFile, nil
 }
@@ -570,6 +596,9 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	if f.fileName != "" {
 		if dir != "" {
 			return nil, fs.ErrorDirNotFound
+		}
+		if f.fileObj != nil {
+			return fs.DirEntries{f.fileObj}, nil
 		}
 		obj, err := f.NewObject(ctx, f.fileName)
 		if err != nil {

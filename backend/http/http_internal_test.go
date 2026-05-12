@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,6 +345,47 @@ func TestIsAFileRoot(t *testing.T) {
 
 	_, err = f.List(context.Background(), "anysub")
 	assert.Equal(t, fs.ErrorDirNotFound, err)
+}
+
+// TestIsAFileListReusesHead verifies that List() in pinned-file mode
+// does not issue a second HEAD request. The HEAD made during NewFs to
+// decide file-vs-directory is sufficient and the result is reused.
+//
+// The single-file pin targets servers that disable directory listings
+// -- typically CDNs or archive mirrors with strict rate limits or
+// per-request billing. Doubling the HEAD count on every List for that
+// audience is the wrong direction.
+func TestIsAFileListReusesHead(t *testing.T) {
+	var headCount int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "HEAD" {
+			atomic.AddInt32(&headCount, 1)
+			w.Header().Set("Content-Length", "5")
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	configfile.Install()
+	m := configmap.Simple{"type": "http", "url": ts.URL}
+
+	f, err := NewFs(context.Background(), remoteName, "thefile", m)
+	require.ErrorIs(t, err, fs.ErrorIsFile)
+	require.EqualValues(t, 1, atomic.LoadInt32(&headCount),
+		"NewFs should issue exactly one HEAD to detect file-vs-dir")
+
+	entries, err := f.List(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "thefile", entries[0].Remote())
+	assert.EqualValues(t, 5, entries[0].Size())
+
+	assert.EqualValues(t, 1, atomic.LoadInt32(&headCount),
+		"List on a pinned-file Fs should reuse the HEAD made during NewFs")
 }
 
 func TestIsAFileSubDir(t *testing.T) {
