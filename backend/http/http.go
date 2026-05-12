@@ -156,7 +156,12 @@ type Fs struct {
 	endpoint    *url.URL
 	endpointURL string // endpoint as a string
 	httpClient  *http.Client
-	fileName    string // set if we are pointing to a file
+	// singleFile is non-empty when the Fs was created against a URL
+	// that resolves to a file rather than a directory. When set,
+	// List() short-circuits to return just this one entry, so the
+	// backend can be used against servers that disable directory
+	// listings.
+	singleFile string
 }
 
 // Object is a remote object that has been stat'd (so it exists, but is not necessarily open for reading)
@@ -298,7 +303,7 @@ func (f *Fs) httpConnection(ctx context.Context, opt *Options) (isFile bool, err
 
 	if isFile {
 		// Correct root if definitely pointing to a file
-		f.fileName = path.Base(f.root)
+		f.singleFile = path.Base(f.root)
 		f.root = path.Dir(f.root)
 		if f.root == "." || f.root == "/" {
 			f.root = ""
@@ -567,11 +572,11 @@ func (f *Fs) readDir(ctx context.Context, dir string) (names []string, err error
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	// pointed at a single file: only that file is visible
-	if f.fileName != "" {
+	if f.singleFile != "" {
 		if dir != "" {
 			return nil, fs.ErrorDirNotFound
 		}
-		obj, err := f.NewObject(ctx, f.fileName)
+		obj, err := f.NewObject(ctx, f.singleFile)
 		if err != nil {
 			return nil, err
 		}
