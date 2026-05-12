@@ -565,6 +565,10 @@ func (f *Fs) readDir(ctx context.Context, dir string) (names []string, err error
 //
 // This should return ErrDirNotFound if the directory isn't
 // found.
+//
+// If the Fs was created against a URL that resolves to a single
+// file, only the root listing ("") is valid and contains that
+// file; any non-empty dir returns ErrDirNotFound.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	// pointed at a single file: only that file is visible
 	if f.fileName != "" {
